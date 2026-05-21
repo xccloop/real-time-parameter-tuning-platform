@@ -1,7 +1,7 @@
-log/
-build/
-*.tar.xz
-toolchain_path.cmake
-.vscode/
+# Root
+.DS_Store
+Thumbs.db
 *.swp
-*.o
+*.swo
+*~
+*.log

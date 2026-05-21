@@ -1,1 +1,0 @@
-cmake -DCMAKE_TOOLCHAIN_FILE=../rv1103.cmake ..	
