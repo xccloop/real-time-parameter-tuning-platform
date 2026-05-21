@@ -1,4 +1,5 @@
 #include "commands.hpp"
+#include "tuning_platform.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -14,10 +15,16 @@
 static void cmd_help(int argc, char **argv)
 {
     (void)argc; (void)argv;
-    // Shell::print_help() 是外部符号，这里通过全局 shell 指针调用
-    // 实际在 main.cpp 的 register_builtin_commands 中通过 lambda/bind 注册
-    printf("Available commands: help, status, echo, uptime, uname, reboot\n");
-    printf("Type '<cmd> --help' for detailed usage.\n");
+    printf("\nAvailable commands:\n");
+    printf("  help       — Show this help\n");
+    printf("  status     — System resource status (RAM, load...)\n");
+    printf("  echo       — Echo text back, usage: echo <text>\n");
+    printf("  uptime     — Show system uptime\n");
+    printf("  uname      — Show kernel version and arch\n");
+    printf("  reboot     — Reboot the system (needs root)\n");
+    printf("  set        — Set a tuning parameter, usage: set <name> <value>\n");
+    printf("  get        — Show all tuning parameters\n");
+    printf("\n");
 }
 
 // ---- status --------------------------------------------------------------
@@ -94,12 +101,33 @@ static void cmd_reboot(int argc, char **argv)
 
     printf("Rebooting in 1 second...\n");
     fflush(stdout);
-    // 注意：需要 root 权限，否则 EPERM
     sync();
     if (system("reboot") != 0)
     {
         printf("reboot failed (need root?)\n");
     }
+}
+
+// ---- set（参数调优核心命令）----------------------------------------------
+static void cmd_set(int argc, char **argv)
+{
+    if (argc < 3)
+    {
+        printf("Usage: set <name> <value>\n");
+        printf("Example: set speed 500\n");
+        printf("Use 'get' to see all parameters and their names.\n");
+        return;
+    }
+
+    int value = atoi(argv[2]);
+    TuningPlatform::instance().set_param(argv[1], value);
+}
+
+// ---- get（参数查看命令）--------------------------------------------------
+static void cmd_get(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    TuningPlatform::instance().list_params();
 }
 
 // ============================================================================
@@ -113,4 +141,6 @@ void register_builtin_commands(Shell &shell)
     shell.register_cmd("uptime", "Show system uptime",                    cmd_uptime);
     shell.register_cmd("uname",  "Show kernel version and arch",          cmd_uname);
     shell.register_cmd("reboot", "Reboot the system (needs root)",        cmd_reboot);
+    shell.register_cmd("set",    "Set a tuning parameter: set <name> <value>", cmd_set);
+    shell.register_cmd("get",    "Show all tuning parameters",            cmd_get);
 }

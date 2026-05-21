@@ -1,16 +1,25 @@
 /**
- * Kyl-Epoll: 龙芯 LS2K0300 智能车 epoll 可交互串口命令系统
+ * Real-Time Parameter Tuning Platform
+ * 龙芯 LS2K0300 智能车 — epoll 串口实时参数在线调试系统
+ *
+ * 核心演示：
+ *   主循环每 1 秒打印可调参数表
+ *   用户在电脑端 via 串口发送 "set speed 500" 即刻修改
+ *   打印输出立即反映新值 —— 真正的"实时在线调参"
  *
  * 架构：
  *   UART1 (/dev/ttyS1)  <-->  Epoll 事件循环  <-->  Shell 命令解析器
+ *                                                <-->  TuningPlatform 参数管理
  *
  * 工作流：
  *   1. 初始化 UART1 (115200 8N1)
- *   2. 用 epoll_create1 创建 epoll 实例
- *   3. 注册 UART1 fd 到 epoll (EPOLLIN)
- *   4. 主循环 epoll_wait(100ms) 等待事件
- *   5. 有数据 → 逐字符读入行缓冲 → 回车后 execute(line) → prompt()
- *   6. 无超时 → 继续循环（可扩展做后台任务）
+ *   2. 创建 epoll 实例，注册 UART1 fd (EPOLLIN)
+ *   3. 注册 4 个可调参数 (speed/kp/ki/kd) 到 TuningPlatform
+ *   4. 主循环：
+ *      a) epoll_wait(100ms) 等待串口输入
+ *      b) 有输入 → 逐字符组装命令行 → 回车执行（如 "set kp 75"）
+ *      c) 每 10 个超时周期(~1s) → 打印参数表
+ *      d) 用户修改的值在下次打印中立即体现
  */
 
 #include "zf_common_headfile.h"
@@ -18,24 +27,84 @@
 #include "epoll.hpp"
 #include "shell.hpp"
 #include "commands.hpp"
+#include "tuning_platform.hpp"
 
 #include <cstdio>
 #include <cstring>
 #include <unistd.h>
 #include <errno.h>
 
-#define INPUT_BUF_SIZE  256     // 命令行最大长度
-#define EPOLL_TIMEOUT_MS 100    // epoll_wait 超时（ms），兼顾后台任务
+#define INPUT_BUF_SIZE    256     // 命令行最大长度
+#define EPOLL_TIMEOUT_MS  100     // epoll_wait 超时（ms）
+#define PRINT_INTERVAL    10      // 每 N 个超时周期打印一次参数表（10*100ms=1s）
 
+// ============================================================================
+// 全局可调参数 —— 这就是"可实时修改的变量"
+// ============================================================================
+int g_param_speed = 200;   // 目标速度 (mm/s),        范围: 0 ~ 1000
+int g_param_kp    = 50;    // PID 比例系数 (x0.01),   范围: 0 ~ 500
+int g_param_ki    = 10;    // PID 积分系数 (x0.01),   范围: 0 ~ 500
+int g_param_kd    = 30;    // PID 微分系数 (x0.01),   范围: 0 ~ 500
+
+// ============================================================================
+// 辅助函数: 打印参数状态表（周期性调用）
+// ============================================================================
+static void print_tuning_status(int seconds)
+{
+    printf("\n");
+    printf("+==================================================================+\n");
+    printf("|    Real-Time Parameter Tuning Platform  |  Uptime: %3d s         |\n",
+           seconds);
+    printf("+--------+---------+-----------+-----------+-----------------------+\n");
+    printf("| Param  |  Value  |    Min    |    Max    |  Description          |\n");
+    printf("+--------+---------+-----------+-----------+-----------------------+\n");
+    printf("| speed  | %7d | %9d | %9d |  Target speed (mm/s)  |\n",
+           g_param_speed, 0, 1000);
+    printf("| kp     | %7d | %9d | %9d |  PID P-gain (x0.01)   |\n",
+           g_param_kp, 0, 500);
+    printf("| ki     | %7d | %9d | %9d |  PID I-gain (x0.01)   |\n",
+           g_param_ki, 0, 500);
+    printf("| kd     | %7d | %9d | %9d |  PID D-gain (x0.01)   |\n",
+           g_param_kd, 0, 500);
+    printf("+--------+---------+-----------+-----------+-----------------------+\n");
+    printf("|  Send 'set <name> <value>' to modify.  'get' to refresh.        |\n");
+    printf("|  Example:  set speed 500                                        |\n");
+    printf("+--------+---------+-----------+-----------+-----------------------+\n");
+    printf("\n");
+}
+
+// ============================================================================
+// 注册可调参数到 TuningPlatform
+// ============================================================================
+static void init_tuning_platform()
+{
+    TuningPlatform &tp = TuningPlatform::instance();
+
+    tp.register_param("speed", &g_param_speed, 0,   1000, "Target speed (mm/s)");
+    tp.register_param("kp",    &g_param_kp,    0,   500,  "PID P-gain (x0.01)");
+    tp.register_param("ki",    &g_param_ki,    0,   500,  "PID I-gain (x0.01)");
+    tp.register_param("kd",    &g_param_kd,    0,   500,  "PID D-gain (x0.01)");
+}
+
+// ============================================================================
+// 主函数
+// ============================================================================
 int main()
 {
     printf("\n");
-    printf("========================================\n");
-    printf("  Kyl-Epoll  Interactive Shell\n");
+    printf("==========================================================\n");
+    printf("  Real-Time Parameter Tuning Platform\n");
     printf("  Board:  LS2K0300 (loongarch64)\n");
     printf("  UART1:  /dev/ttyS1 @ 115200 8N1\n");
     printf("  Build:  %s %s\n", __DATE__, __TIME__);
-    printf("========================================\n\n");
+    printf("==========================================================\n");
+    printf("\n");
+    printf("  HOW TO USE:\n");
+    printf("    1. Connect:  screen /dev/ttyUSB0 115200\n");
+    printf("    2. Watch:    parameters auto-print every ~1 second\n");
+    printf("    3. Tune:     type 'set speed 500' to change on-the-fly\n");
+    printf("    4. Verify:   watch the printed value change\n");
+    printf("\n");
 
     // ---- 1. 初始化 UART1 ----
     if (uart1_init() != 0)
@@ -62,24 +131,30 @@ int main()
         return 1;
     }
 
-    // ---- 4. 初始化命令 Shell ----
+    // ---- 4. 初始化参数调优平台 ----
+    init_tuning_platform();
+
+    // ---- 5. 初始化命令 Shell ----
     Shell shell(32);
     register_builtin_commands(shell);
 
-    // ---- 5. 行缓冲 ----
+    // ---- 6. 行缓冲 ----
     char line_buf[INPUT_BUF_SIZE];
     int  line_pos = 0;
     memset(line_buf, 0, sizeof(line_buf));
 
-    shell.prompt();
+    printf("\n");  // 额外空行，让第一个计时打印不被提示符干扰
 
-    // ---- 6. 事件循环 ----
+    // ---- 7. 事件循环 ----
     int loop_count = 0;
+    int print_tick = 0;
+
     while (1)
     {
         int nfds = ep.wait(EPOLL_TIMEOUT_MS);
+        print_tick++;
 
-        // --- 处理就绪事件 ---
+        // --- 处理就绪事件（串口输入）---
         for (int i = 0; i < nfds; i++)
         {
             int fd = ep.ready_fd(i);
@@ -89,28 +164,26 @@ int main()
             if (fd == uart_fd && (ev & EPOLLIN))
             {
                 char c;
-                // 逐字符读取（避免行缓冲被截断）
                 while (1)
                 {
                     ssize_t n = read(uart_fd, &c, 1);
                     if (n <= 0)
                     {
-                        // 无更多数据（EAGAIN）或出错
                         if (n < 0 && errno == EAGAIN) break;
                         break;
                     }
 
-                    // 字符回显（终端体验）
+                    // 字符回显
                     if (c != '\r' && c != '\n')
                     {
-                        write(uart_fd, &c, 1);   // 回显
+                        write(uart_fd, &c, 1);
                     }
                     else if (c == '\r')
                     {
-                        write(uart_fd, "\r\n", 2); // 回车换行
+                        write(uart_fd, "\r\n", 2);
                     }
 
-                    // 处理回车/换行 → 执行命令
+                    // 回车 → 执行命令
                     if (c == '\r' || c == '\n')
                     {
                         line_buf[line_pos] = '\0';
@@ -122,14 +195,13 @@ int main()
                         memset(line_buf, 0, sizeof(line_buf));
                         shell.prompt();
                     }
-                    // 退格处理
+                    // 退格
                     else if (c == 0x7F || c == '\b')
                     {
                         if (line_pos > 0)
                         {
                             line_pos--;
                             line_buf[line_pos] = '\0';
-                            // VT100 退格序列: \b \s \b
                             write(uart_fd, "\b \b", 3);
                         }
                     }
@@ -148,7 +220,6 @@ int main()
             if (ev & (EPOLLERR | EPOLLHUP))
             {
                 fprintf(stderr, "epoll: fd=%d error/hangup (events=0x%x)\n", fd, ev);
-                // UART 断开 → 尝试重新初始化
                 if (fd == uart_fd)
                 {
                     ep.del(uart_fd);
@@ -165,12 +236,12 @@ int main()
             }
         }
 
-        // --- 后台任务（无事件时执行，可用于状态更新等） ---
-        loop_count++;
-        if (loop_count % 100 == 0)
+        // --- 周期性打印参数表（每秒一次）---
+        if (print_tick >= PRINT_INTERVAL)
         {
-            // 每 10 秒（100 * 100ms）可以做一些周期性检查
-            // 例如：按键扫描、LED 闪烁、传感器轮询等
+            print_tick = 0;
+            loop_count++;
+            print_tuning_status(loop_count);
         }
     }
 
