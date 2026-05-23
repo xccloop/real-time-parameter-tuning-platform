@@ -183,5 +183,6 @@ class ConnectPage(QWidget):
         self.connect_btn.setEnabled(True)
         self.ip_input.setEnabled(True)
         self.port_input.setEnabled(True)
-        self.status_label.setText(f"连接失败")
+        short = msg.split('] ')[-1] if '] ' in msg else msg
+        self.status_label.setText(f"连接失败: {short}")
         self.status_label.setStyleSheet("color: #ff5252; font-size: 13px; font-weight: 500;")
