@@ -5,3 +5,11 @@ Thumbs.db
 *.swo
 *~
 *.log
+*.py[cod]
+__pycache__/
+*.egg-info/
+dist/
+build/
+*.spec
+.venv/
+.env
